@@ -1,0 +1,6 @@
+{
+  "name": "DSA Pattern Tracker",
+  "description": "A premium, responsive, self-contained DSA Pattern Tracker with hybrid Supabase and LocalStorage persistence and dynamic streak logs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

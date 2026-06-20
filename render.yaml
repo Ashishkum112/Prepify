@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: dsa-pattern-tracker
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 22
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: DEFAULT_REMINDER_EMAIL
+        sync: false
