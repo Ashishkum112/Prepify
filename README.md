@@ -23,14 +23,22 @@ Create a Google OAuth **Web application** client and enable the Calendar API and
 - `userinfo.profile`
 - `userinfo.email`
 
-Add both your local origin (`http://localhost:3000`) and deployed HTTPS origin to **Authorized JavaScript origins**, then set:
+Add both your local origin (`http://localhost:3000`) and deployed HTTPS origin to **Authorized JavaScript origins**, then:
 
-```env
+### Local Development
+```bash
+copy .env.example .env.local
+# Add to .env.local:
 GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 DEFAULT_REMINDER_EMAIL=you@example.com
 ```
 
-No Google client secret is needed or accepted by this browser OAuth flow.
+### Production (Render)
+Set these environment variables in Render dashboard settings:
+- `GOOGLE_CLIENT_ID`: your-client-id.apps.googleusercontent.com
+- `DEFAULT_REMINDER_EMAIL`: you@example.com
+
+No Google client secret is needed or accepted by this browser OAuth flow. OAuth credentials are managed via environment variables only—never exposed in the UI.
 
 ## Production
 

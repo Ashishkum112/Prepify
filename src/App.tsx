@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import TimerCard, { TimerState } from './components/TimerCard';
 import { 
   Flame, 
   Calendar, 
@@ -30,6 +31,28 @@ import {
   Difficulty
 } from './types';
 
+// --- Input Validation Helpers ---
+const isValidEmail = (email: string): boolean => {
+  if (!email || typeof email !== 'string') return false;
+  const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return re.test(email) && email.length <= 254;
+};
+
+const isValidUrl = (url: string): boolean => {
+  if (!url || typeof url !== 'string') return false;
+  try {
+    new URL(url);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const sanitizeString = (str: string): string => {
+  if (typeof str !== 'string') return '';
+  return str.trim().slice(0, 500); // Max 500 chars
+};
+
 export default function App() {
   // --- Config State ---
   const [config, setConfig] = useState<AppConfig>({
@@ -43,7 +66,8 @@ export default function App() {
   // --- Auth State ---
   const [accessToken, setAccessToken] = useState<string | null>(() => {
     try {
-      return localStorage.getItem('google_access_token');
+      const token = localStorage.getItem('google_access_token');
+      return (token && typeof token === 'string' && token.length > 0) ? token : null;
     } catch {
       return null;
     }
@@ -51,11 +75,14 @@ export default function App() {
   const [profile, setProfile] = useState<any | null>(() => {
     try {
       const saved = localStorage.getItem('google_profile');
-      return saved ? JSON.parse(saved) : null;
+      if (!saved || typeof saved !== 'string') return null;
+      const parsed = JSON.parse(saved);
+      return (parsed && typeof parsed === 'object' && parsed.name) ? parsed : null;
     } catch {
       return null;
     }
   });
+  const [authLoading, setAuthLoading] = useState<boolean>(false);
 
   // --- Study Progress State ---
   const [progress, setProgress] = useState<ProgressState>(() => {
@@ -149,6 +176,49 @@ export default function App() {
   const [showConfigDrawer, setShowConfigDrawer] = useState<boolean>(false);
   const [toasts, setToasts] = useState<Array<{ id: string; text: string; type: 'success' | 'warn' | 'info' | 'error' }>>([]);
 
+  // --- Timers (Productive Hours) ---
+  const TIMER_STORAGE_KEY = 'prepify_timers';
+  const defaultCategories = ['DSA', 'LLD', 'HLD', 'Interview Questions'];
+  const [timers, setTimers] = useState<Record<string, TimerState>>(() => {
+    try {
+      const raw = localStorage.getItem(TIMER_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          // ensure all default categories exist
+          const result: Record<string, TimerState> = {};
+          defaultCategories.forEach(cat => {
+            const v = parsed[cat];
+            result[cat] = v && typeof v === 'object' ? {
+              category: cat,
+              elapsedMs: typeof v.elapsedMs === 'number' ? v.elapsedMs : 0,
+              running: !!v.running,
+              lastStartedAt: typeof v.lastStartedAt === 'number' ? v.lastStartedAt : null,
+            } : { category: cat, elapsedMs: 0, running: false, lastStartedAt: null };
+          });
+          return result;
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load timers', e);
+    }
+    const blank: Record<string, TimerState> = {};
+    defaultCategories.forEach(cat => { blank[cat] = { category: cat, elapsedMs: 0, running: false, lastStartedAt: null }; });
+    return blank;
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(TIMER_STORAGE_KEY, JSON.stringify(timers));
+    } catch (e) {
+      console.error('Failed to persist timers', e);
+    }
+  }, [timers]);
+
+  const handleTimerChange = (s: TimerState) => {
+    setTimers(prev => ({ ...prev, [s.category]: s }));
+  };
+
   // --- Pattern & Question Handlers ---
   const handleAddPattern = () => {
     if (!newPatternName.trim() || !newPatternTag.trim()) {
@@ -158,10 +228,10 @@ export default function App() {
     const newIdx = patterns.length > 0 ? Math.max(...patterns.map(p => p.index)) + 1 : 0;
     const newPattern: Pattern = {
       index: newIdx,
-      name: newPatternName.trim(),
-      tag: newPatternTag.trim(),
+      name: sanitizeString(newPatternName),
+      tag: sanitizeString(newPatternTag),
       icon: newPatternIcon || "📁",
-      description: newPatternDesc.trim() || "Custom learning pattern",
+      description: sanitizeString(newPatternDesc) || "Custom learning pattern",
       questions: []
     };
     setPatterns(prev => [...prev, newPattern]);
@@ -181,14 +251,21 @@ export default function App() {
       addToast("Question name cannot be blank!", "error");
       return;
     }
+    
     const targetUrl = newQUrl.trim() || "https://leetcode.com";
+    
+    // Validate URL format
+    if (!isValidUrl(targetUrl)) {
+      addToast("Invalid URL format. Use https://... format.", "error");
+      return;
+    }
     
     setPatterns(prev => prev.map(p => {
       if (p.index === patternIndex) {
         const uniqueQId = `p${p.index}-qcustom-${Date.now()}`;
         const newQuestion: Question = {
           id: uniqueQId,
-          name: newQName.trim(),
+          name: sanitizeString(newQName),
           difficulty: newQDiff,
           url: targetUrl
         };
@@ -212,13 +289,16 @@ export default function App() {
   // --- Load backend configurations on boot ---
   useEffect(() => {
     fetch("/api/config")
-      .then(res => res.json())
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
       .then(data => {
-        if (data && data.googleClientId) {
+        if (data && typeof data === 'object' && data.googleClientId) {
           setConfig(data);
         }
       })
-      .catch(err => console.error("Error loaded config from server:", err));
+      .catch(err => console.error("Config load error - using defaults"));
 
     refreshLogs();
     const logInterval = setInterval(() => {
@@ -277,28 +357,28 @@ export default function App() {
       !config.googleClientId.includes('YOUR_') &&
       !config.googleClientId.includes('REPLACE_WITH');
     if (!hasValidClientId) {
-      setShowConfigDrawer(true);
-      addToast("Add your Google OAuth Client ID in Settings first.", "warn");
+      addToast("OAuth not configured. Please check with admin.", "error");
       return;
     }
 
     const google = (window as any).google;
     if (typeof google === 'undefined' || !google.accounts) {
-      addToast("Google Sign-In external script loading. Please wait 2 seconds or refresh.", "warn");
+      addToast("Loading authentication. Please wait...", "info");
+      setTimeout(() => initGoogleAuth(), 2000);
       return;
     }
 
     try {
-      addToast("Opening Google Authorization pop-up window...", "info");
+      setAuthLoading(true);
       const client = google.accounts.oauth2.initTokenClient({
-        client_id: config.googleClientId || "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com",
+        client_id: config.googleClientId,
         scope: "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email",
         callback: async (response: any) => {
           if (response.access_token) {
             setAccessToken(response.access_token);
             localStorage.setItem('google_access_token', response.access_token);
 
-            // Fetch profiles
+            // Fetch profile
             try {
               const profileRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
                 headers: { "Authorization": `Bearer ${response.access_token}` }
@@ -307,19 +387,27 @@ export default function App() {
                 const profileData = await profileRes.json();
                 setProfile(profileData);
                 localStorage.setItem('google_profile', JSON.stringify(profileData));
-                addToast(`Logged in safely as ${profileData.name}!`, "success");
+                addToast(`Welcome back, ${profileData.name}!`, "success");
+              } else {
+                addToast("Authentication successful. Redirecting...", "info");
+                setProfile({ name: "User" });
               }
             } catch (err) {
-              console.error("Profile retrieval error:", err);
+              console.error("Profile retrieval error");
+              setProfile({ name: "User" });
             }
             refreshLogs();
+          } else {
+            addToast("Authentication cancelled.", "warn");
           }
+          setAuthLoading(false);
         }
       });
       client.requestAccessToken({ prompt: "consent" });
     } catch (err: any) {
-      console.error(err);
-      addToast(`GSI initialization failed: ${err.message}`, "error");
+      console.error("GSI initialization error");
+      addToast(`Authentication failed. Try refreshing the page.`, "error");
+      setAuthLoading(false);
     }
   };
 
@@ -333,6 +421,16 @@ export default function App() {
 
   // --- Config Drawer updates ---
   const saveConfig = async (newConfig: AppConfig) => {
+    // Validate config before saving
+    if (newConfig.testEmail && !isValidEmail(newConfig.testEmail)) {
+      addToast("Invalid email address format.", "error");
+      return;
+    }
+    
+    if (newConfig.googleClientId && !newConfig.googleClientId.endsWith('.apps.googleusercontent.com')) {
+      addToast("Invalid Google Client ID format. Should end with .apps.googleusercontent.com", "warn");
+    }
+
     try {
       const res = await fetch("/api/config", {
         method: "POST",
@@ -341,6 +439,7 @@ export default function App() {
       });
       if (res.ok) {
         const data = await res.json();
+        // Don't log the client ID for security
         setConfig(data.config);
         addToast("Settings successfully applied to background worker.", "success");
         refreshLogs();
@@ -349,7 +448,7 @@ export default function App() {
         addToast(data?.error || "Could not save settings.", "error");
       }
     } catch (err) {
-      console.error(err);
+      console.error("Config save error (details not logged for security)");
       addToast("Could not reach the settings service.", "error");
     }
   };
@@ -369,7 +468,7 @@ export default function App() {
     };
   };
 
-  // --- Toggling solved checklists ---
+  // --- Toggling solved checklists with race condition protection ---
   const toggleSolved = async (q: Question, _patternIdx: number) => {
     const questionId = q.id;
     const isSolved = !progress[questionId]?.solved;
@@ -378,84 +477,97 @@ export default function App() {
 
     addToast(isSolved ? `🎉 Resolved: "${q.name}"` : `Marked Unchecked: "${q.name}"`, isSolved ? "success" : "info");
 
-    let updatedProgress: ProgressState = { ...progress };
-    const integrationRequests: Promise<Response>[] = [];
+    // Use functional setState to prevent race conditions
+    setProgress(prevProgress => {
+      let updatedProgress: ProgressState = { ...prevProgress };
+      const integrationRequests: Promise<Response>[] = [];
 
-    if (isSolved) {
-      const calculated = calculateSpacedDates(todayStr);
-      updatedProgress[questionId] = {
-        solved: true,
-        note: notesValue,
-        solvedAt: todayStr,
-        spacedRepetitionDate1: calculated.d1,
-        spacedRepetitionDate7: calculated.d7,
-        spacedRepetitionDate14: calculated.d14
-      };
+      if (isSolved) {
+        const calculated = calculateSpacedDates(todayStr);
+        updatedProgress[questionId] = {
+          solved: true,
+          note: notesValue,
+          solvedAt: todayStr,
+          spacedRepetitionDate1: calculated.d1,
+          spacedRepetitionDate7: calculated.d7,
+          spacedRepetitionDate14: calculated.d14
+        };
 
-      // --- Trigger Spaced Calendar auto blocks on back-end server ---
-      if (config.calendarAutoBlock) {
-        integrationRequests.push(
-          fetch("/api/calendar/block", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              accessToken: accessToken || "MOCK_TOKEN",
-              questionName: q.name,
-              difficulty: q.difficulty,
-              url: q.url,
-              intervals: [1, 7, 14]
+        // --- Trigger Spaced Calendar auto blocks on back-end server ---
+        if (config.calendarAutoBlock && config.googleClientId && config.googleClientId.endsWith('.apps.googleusercontent.com')) {
+          integrationRequests.push(
+            fetch("/api/calendar/block", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                accessToken: accessToken || "MOCK_TOKEN",
+                questionName: q.name.trim(),
+                difficulty: q.difficulty,
+                url: q.url,
+                intervals: [1, 7, 14]
+              })
+            }).catch(err => {
+              console.error("Calendar block failed:", err);
+              addToast("Calendar sync failed (will retry)", "warn");
+              return null;
             })
-          })
-        );
-      }
+          );
+        }
 
-      // --- Trigger Mail Alert dispatch on backend ---
-      if (config.emailReminders) {
-        integrationRequests.push(
-          fetch("/api/gmail/send", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              accessToken: accessToken || "MOCK_TOKEN",
-              questionName: q.name,
-              difficulty: q.difficulty,
-              url: q.url,
-              targetDay: 1
+        // --- Trigger Mail Alert dispatch on backend ---
+        if (config.emailReminders && config.testEmail && isValidEmail(config.testEmail)) {
+          integrationRequests.push(
+            fetch("/api/gmail/send", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                accessToken: accessToken || "MOCK_TOKEN",
+                questionName: q.name.trim(),
+                difficulty: q.difficulty,
+                url: q.url,
+                targetDay: 1
+              })
+            }).catch(err => {
+              console.error("Email send failed:", err);
+              addToast("Email sync failed (will retry)", "warn");
+              return null;
             })
-          })
-        );
+          );
+        }
+
+        // Update streaks state
+        let updatedDates = Array.isArray(streak?.streakDates) ? [...streak.streakDates] : [];
+        if (!updatedDates.includes(todayStr)) {
+          updatedDates.push(todayStr);
+        }
+        
+        // Calculate consecutive current streak
+        const currentStreak = computeStreakCount(updatedDates);
+
+        setStreak({
+          currentStreak,
+          lastSolvedDate: todayStr,
+          streakDates: updatedDates
+        });
+
+      } else {
+        updatedProgress[questionId] = {
+          solved: false,
+          note: notesValue,
+          solvedAt: undefined,
+          spacedRepetitionDate1: undefined,
+          spacedRepetitionDate7: undefined,
+          spacedRepetitionDate14: undefined
+        };
       }
 
-      // Update streaks state
-      let updatedDates = Array.isArray(streak?.streakDates) ? [...streak.streakDates] : [];
-      if (!updatedDates.includes(todayStr)) {
-        updatedDates.push(todayStr);
+      // Trigger async operations after state update
+      if (integrationRequests.length > 0) {
+        Promise.allSettled(integrationRequests.filter(r => r !== null)).then(refreshLogs);
       }
-      
-      // Calculate consecutive current streak
-      const currentStreak = computeStreakCount(updatedDates);
 
-      setStreak({
-        currentStreak,
-        lastSolvedDate: todayStr,
-        streakDates: updatedDates
-      });
-
-    } else {
-      updatedProgress[questionId] = {
-        solved: false,
-        note: notesValue,
-        solvedAt: undefined,
-        spacedRepetitionDate1: undefined,
-        spacedRepetitionDate7: undefined,
-        spacedRepetitionDate14: undefined
-      };
-    }
-
-    setProgress(updatedProgress);
-    if (integrationRequests.length > 0) {
-      void Promise.allSettled(integrationRequests).then(refreshLogs);
-    }
+      return updatedProgress;
+    });
   };
 
   const saveNote = (questionId: string, text: string) => {
@@ -469,6 +581,12 @@ export default function App() {
   };
 
   const triggerManualTestSpaced = async (q: Question, reviewDay: number) => {
+    // Validate question data before sending
+    if (!q.name || !q.difficulty || !isValidUrl(q.url)) {
+      addToast("Invalid question data. Cannot trigger alert.", "error");
+      return;
+    }
+
     addToast(`Force triggering study alert for Day ${reviewDay}: "${q.name}"`, "info");
     try {
       // Calendar Event Send simulation
@@ -477,11 +595,14 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           accessToken: accessToken || "MOCK_TOKEN",
-          questionName: q.name,
+          questionName: sanitizeString(q.name),
           difficulty: q.difficulty,
           url: q.url,
           intervals: [reviewDay]
         })
+      }).catch(err => {
+        console.error("Calendar block error");
+        addToast("Calendar sync failed", "warn");
       });
 
       // Email dispatch simulation
@@ -490,16 +611,19 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           accessToken: accessToken || "MOCK_TOKEN",
-          questionName: q.name,
+          questionName: sanitizeString(q.name),
           difficulty: q.difficulty,
           url: q.url,
           targetDay: reviewDay
         })
+      }).catch(err => {
+        console.error("Gmail send error");
+        addToast("Email sync failed", "warn");
       });
 
       refreshLogs();
     } catch (err) {
-      console.error(err);
+      console.error("Test trigger error");
       addToast("Testing trigger failed to hit mock server.", "error");
     }
   };
@@ -638,6 +762,106 @@ export default function App() {
 
   const upcomingReviews = useMemo(getUpcomingReviews, [progress, patterns]);
 
+  // --- Render login screen if not authenticated ---
+  if (!profile) {
+    return (
+      <div className="min-h-screen bg-brand-bg text-[#e8e8f0] font-sans antialiased flex items-center justify-center p-4">
+        {/* Login Screen */}
+        <div className="w-full max-w-md">
+          <div className="bg-brand-surface border border-brand-border rounded-3xl p-12 flex flex-col items-center gap-8 shadow-2xl">
+            {/* Logo */}
+            <div className="w-16 h-16 bg-gradient-to-br from-brand-accent to-brand-accent2 rounded-2xl flex items-center justify-center font-display font-black text-2xl text-white shadow-lg shadow-brand-accent/30">
+              P
+            </div>
+
+            {/* Title & Description */}
+            <div className="text-center flex flex-col gap-3">
+              <h1 className="text-4xl font-display font-black tracking-tight bg-gradient-to-r from-brand-accent to-brand-accent2 bg-clip-text text-transparent">
+                Prepify
+              </h1>
+              <p className="text-sm text-slate-400">Master DSA patterns with spaced repetition</p>
+            </div>
+
+            {/* Features List */}
+            <div className="w-full flex flex-col gap-3">
+              <div className="flex items-center gap-3 text-xs text-slate-300">
+                <div className="w-5 h-5 rounded-full bg-brand-accent/20 flex items-center justify-center">
+                  <span className="text-brand-accent text-[10px] font-bold">✓</span>
+                </div>
+                <span>Track 150+ curated DSA problems</span>
+              </div>
+              <div className="flex items-center gap-3 text-xs text-slate-300">
+                <div className="w-5 h-5 rounded-full bg-brand-accent/20 flex items-center justify-center">
+                  <span className="text-brand-accent text-[10px] font-bold">✓</span>
+                </div>
+                <span>Spaced repetition scheduling</span>
+              </div>
+              <div className="flex items-center gap-3 text-xs text-slate-300">
+                <div className="w-5 h-5 rounded-full bg-brand-accent/20 flex items-center justify-center">
+                  <span className="text-brand-accent text-[10px] font-bold">✓</span>
+                </div>
+                <span>Google Calendar & Email integration</span>
+              </div>
+            </div>
+
+            {/* Divider */}
+            <div className="w-full h-px bg-gradient-to-r from-transparent via-brand-border to-transparent"></div>
+
+            {/* Login Button */}
+            <button
+              onClick={initGoogleAuth}
+              disabled={authLoading}
+              className="w-full py-3 px-6 bg-gradient-to-r from-brand-accent to-brand-accent2 hover:from-brand-accent/90 hover:to-brand-accent2/90 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-all duration-300 flex items-center justify-center gap-3 shadow-lg shadow-brand-accent/25"
+            >
+              {authLoading ? (
+                <>
+                  <div className="w-4 h-4 rounded-full border-2 border-white/30 border-t-white animate-spin"></div>
+                  <span>Connecting...</span>
+                </>
+              ) : (
+                <>
+                  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2m0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8m3.5-9c.83 0 1.5-.67 1.5-1.5S16.33 8 15.5 8 14 8.67 14 9.5s.67 1.5 1.5 1.5m-7 0c.83 0 1.5-.67 1.5-1.5S9.33 8 8.5 8 7 8.67 7 9.5 7.67 11 8.5 11m3.5 6.5c2.33 0 4.31-1.46 5.11-3.5H6.89c.8 2.04 2.78 3.5 5.11 3.5z" fill="currentColor"/>
+                  </svg>
+                  <span>Sign in with Google</span>
+                </>
+              )}
+            </button>
+
+            {/* Footer */}
+            <p className="text-[11px] text-slate-500 text-center">
+              By signing in, you agree to our terms of service and privacy policy
+            </p>
+          </div>
+        </div>
+
+        {/* Toast notifications */}
+        <div className="fixed bottom-4 right-4 z-[9999] flex flex-col gap-2 pointer-events-none">
+          {toasts.map(toast => (
+            <div 
+              key={toast.id} 
+              className={`px-4 py-3 rounded-lg shadow-2xl border flex items-center gap-3 backdrop-blur-md animate-fade-in pointer-events-auto transition-all ${
+                toast.type === 'success' ? 'bg-[#112519]/90 text-emerald-300 border-emerald-500/40' :
+                toast.type === 'error' ? 'bg-[#291414]/90 text-red-300 border-red-500/40' :
+                toast.type === 'warn' ? 'bg-[#2a1e12]/90 text-amber-300 border-amber-500/40' :
+                'bg-[#121c2c]/90 text-indigo-300 border-indigo-500/40'
+              }`}
+            >
+              <div className={`w-2 h-2 rounded-full animate-ping ${
+                toast.type === 'success' ? 'bg-emerald-400' :
+                toast.type === 'error' ? 'bg-red-400' :
+                toast.type === 'warn' ? 'bg-amber-400' :
+                'bg-indigo-400'
+              }`} />
+              <span className="text-xs font-medium tracking-wide">{toast.text}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // --- Main App (authenticated users) ---
   return (
     <div className="min-h-screen bg-brand-bg text-[#e8e8f0] font-sans antialiased flex flex-col selection:bg-brand-accent selection:text-white">
       {/* Toast popup panel */}
@@ -666,17 +890,17 @@ export default function App() {
       {/* Main Header */}
       <header className="h-16 border-b border-brand-border px-3 md:px-6 flex items-center justify-between glass-blur sticky top-0 z-50">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 bg-brand-accent rounded-xl flex items-center justify-center font-display font-bold text-white shadow-lg shadow-brand-accent/20">
-            D
+          <div className="w-9 h-9 bg-gradient-to-br from-brand-accent to-brand-accent2 rounded-xl flex items-center justify-center font-display font-black text-white shadow-lg shadow-brand-accent/20">
+            P
           </div>
           <div>
-            <h1 className="text-sm md:text-base font-display font-semibold tracking-tight uppercase flex items-center gap-2">
-              DSA Pattern Tracker
+            <h1 className="text-sm md:text-base font-display font-black tracking-tight uppercase flex items-center gap-2 bg-gradient-to-r from-brand-accent to-brand-accent2 bg-clip-text text-transparent">
+              Prepify
               <span className="hidden sm:inline text-[9px] uppercase font-mono px-2 py-0.5 rounded-full border border-brand-border bg-brand-bg font-normal text-slate-400">
-                Spaced Repeat v2
+                DSA Master v2
               </span>
             </h1>
-            <p className="hidden md:block text-[10px] text-slate-500 italic">Robust Spaced Repetition Study Engine</p>
+            <p className="hidden md:block text-[10px] text-slate-500 italic">Spaced Repetition Study Engine</p>
           </div>
         </div>
 
@@ -749,27 +973,15 @@ export default function App() {
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               <div className="flex flex-col gap-2">
-                <label className="text-[10px] font-mono uppercase text-slate-400">Google Client ID (Implicit Flow)</label>
-                <input 
-                  type="text"
-                  value={config.googleClientId}
-                  onChange={e => setConfig({...config, googleClientId: e.target.value})}
-                  className="bg-brand-bg border border-brand-border rounded-xl px-3 py-2 text-xs font-mono text-slate-200 focus:border-brand-accent focus:outline-none"
-                  placeholder="Set your OAuth client key"
-                />
-                <span className="text-[9px] text-slate-500 italic">Enable popups for this origin in Google Cloud Developer Console.</span>
-              </div>
-
-              <div className="flex flex-col gap-2">
                 <label className="text-[10px] font-mono uppercase text-slate-400">Target Notification Mail Address</label>
                 <input 
                   type="email"
                   value={config.testEmail}
                   onChange={e => setConfig({...config, testEmail: e.target.value})}
                   className="bg-brand-bg border border-brand-border rounded-xl px-3 py-2 text-xs font-mono text-slate-200 focus:border-brand-accent focus:outline-none"
-                  placeholder="e.g. Ashishflash29@gmail.com"
+                  placeholder="e.g. you@example.com"
                 />
-                <span className="text-[9px] text-slate-500 italic">Receives a confirmation when a review is scheduled.</span>
+                <span className="text-[9px] text-slate-500 italic">Receives study reminders when review alerts are scheduled.</span>
               </div>
 
               <div className="flex flex-col justify-center gap-4 pt-1">
@@ -789,7 +1001,7 @@ export default function App() {
                 <div className="flex items-center justify-between border-b border-brand-border/40 pb-2">
                   <div className="flex items-center gap-2">
                     <Mail className="w-3.5 h-3.5 text-yellow-400" />
-                    <span className="text-xs font-medium">Email Schedule Confirmations</span>
+                    <span className="text-xs font-medium">Email Study Reminders</span>
                   </div>
                   <input 
                     type="checkbox"
@@ -870,44 +1082,20 @@ export default function App() {
           </div>
         </section>
 
-        {/* Dynamic Google OAuth Setup Banner to prevent 401 invalid_client */}
-        {(config.googleClientId === "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com" || 
-          config.googleClientId === "REPLACE_WITH_YOUR_CLIENT_ID.apps.googleusercontent.com" || 
-          !config.googleClientId || 
-          config.googleClientId.includes("REPLACE_WITH")) && !profile && (
-          <div className="bg-amber-950/20 border border-amber-500/30 rounded-2xl p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 animate-fade-in">
-            <div className="flex items-start gap-3">
-              <div className="p-2 bg-amber-500/10 rounded-xl text-amber-400 mt-0.5">
-                <HelpCircle className="w-5 h-5 animate-pulse" />
-              </div>
-              <div>
-                <h4 className="text-xs font-semibold text-amber-300">Google OAuth Configuration Helper</h4>
-                <p className="text-[11px] text-slate-300 mt-1 leading-normal max-w-2xl">
-                  By default, the application is configured with a placeholder web credential. If you try to Auth with Google, Google will display the 
-                  <span className="text-amber-300 font-bold font-mono px-1">401: invalid_client</span> error on their screen. To resolve this, create an OAuth clientID in your Google Cloud Console, and paste it directly below:
-                </p>
-              </div>
-            </div>
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 max-w-md w-full md:w-auto">
-              <input 
-                type="text"
-                placeholder="Paste Web Client ID here"
-                value={config.googleClientId === "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com" || config.googleClientId.includes("YOUR_") ? "" : config.googleClientId}
-                onChange={e => {
-                  const val = e.target.value;
-                  setConfig(prev => ({ ...prev, googleClientId: val }));
-                }}
-                className="bg-brand-bg border border-brand-border rounded-xl px-3 py-2 text-xs font-mono text-slate-300 focus:border-amber-500 focus:outline-none flex-1 min-w-[240px]"
+        {/* Productive Time Tracker Cards */}
+        <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {['DSA','LLD','HLD','Interview Questions'].map(cat => (
+            <div key={cat} className="flex">
+              <TimerCard
+                initial={timers[cat] || { category: cat, elapsedMs: 0, running: false, lastStartedAt: null }}
+                onChange={handleTimerChange}
               />
-              <button 
-                onClick={() => saveConfig(config)}
-                className="bg-amber-500 text-slate-950 hover:bg-amber-400 text-xs font-bold px-4 py-2 rounded-xl transition cursor-pointer shrink-0"
-              >
-                Save ID Key
-              </button>
             </div>
-          </div>
-        )}
+          ))}
+        </section>
+
+        {/* Dynamic Google OAuth Setup Banner - REMOVED */}
+        {/* Google OAuth is now configured via environment variables for security */}
 
         {/* Dashboard Navigation Filter Bar */}
         <section className="bg-brand-surface border border-brand-border rounded-2xl p-4 flex flex-wrap items-center justify-between gap-4">
